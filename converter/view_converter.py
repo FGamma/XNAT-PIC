@@ -88,6 +88,7 @@ class ViewConverter(BaseView):
 
         # reset switch
         self.sw_overwrite.value = False
+        self.sw_overwrite.disabled = False
 
         # reset treeview
         if self.tree_view_raw_list:
