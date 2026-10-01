@@ -33,7 +33,7 @@ class Bruker2DicomConverter:
             dst_path = dirs[1]
 
             if "Results".lower() in dirs[0].split("/")[-1].lower():
-                shutil.copytree(convert_path, dst_path)
+                pass
 
             else:
                 
@@ -108,11 +108,6 @@ class Bruker2DicomConverter:
                 raw_data = open(dseq_path, "rb")
                 img_data_precision = np.fromfile(raw_data, dtype=data_precision)
                 raw_data.close()
-
-                if not os.path.isdir(dst_path):
-                    os.makedirs(dst_path)
-
-                os.chdir(dst_path)
 
                 """
                 The dicom viewer expects unsigned 16-bit images as input.
@@ -894,6 +889,11 @@ class Bruker2DicomConverter:
                     # outfile = "%s%s.dcm" % (filename_little_endian, str(iteration + 1))
 
                     # Save DICOM files in separate slices
+                    if not os.path.isdir(dst_path):
+                        os.makedirs(dst_path)
+
+                    os.chdir(dst_path)
+
                     os.chdir(dst_path)
                     ds_temp.is_little_endian = True
                     ds_temp.is_implicit_VR = False
@@ -901,4 +901,4 @@ class Bruker2DicomConverter:
 
             print(str(dirs[0].split("/")[-1]) + " done!")
         except Exception as e:
-            pass
+            raise

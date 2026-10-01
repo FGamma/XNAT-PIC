@@ -38,6 +38,7 @@ class ViewConverter(BaseView):
         self.btn_convert = None
         # progressbar
         self.pb_conversion = None
+        self.txt_pb = None
         self.dlg_conversion = None
 
         # layout
@@ -154,9 +155,11 @@ class ViewConverter(BaseView):
         self._page.open(self.dlg_conversion)
         self._page.update()
 
-    def update_progress_bar(self, value: float):
+    def update_progress_bar(self, idx: int, total_scans: int):
         """Update the progress bar value and refresh the page."""
+        value = (idx + 1) / total_scans
         self.pb_conversion.value = value
+        self.txt_pb.value = f"Scan conversion: {idx + 1} / {total_scans}"
         self._page.update()
 
     def close_progress_bar_dialog(self):
@@ -314,9 +317,10 @@ class ViewConverter(BaseView):
         )
         # progressbar dialog
         self.pb_conversion = ft.ProgressBar(width=320, value=None)
+        self.txt_pb = ft.Text("Loading...")
         self.dlg_conversion = ft.AlertDialog(
             modal=True,
-            title=ft.Text("Loading..."),
+            title=self.txt_pb,
             content=ft.Column(
                 tight=True,
                 spacing=12,

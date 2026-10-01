@@ -71,6 +71,11 @@ class FilesystemService:
             output_root.mkdir(parents=True, exist_ok=True)
 
     @staticmethod
+    def delete_folder(dst: Path):
+        if dst.is_dir():
+            shutil.rmtree(dst)
+
+    @staticmethod
     def _find_experiments(path: Path, level: ConverterLevel) -> list[Path]:
         experiment_list = []
         if level == ConverterLevel.PROJECT:
@@ -92,17 +97,19 @@ class FilesystemService:
 
     @staticmethod
     def _is_bruker_scan(scan: Path) -> bool:
-        """A Bruker scan is valid if a '2dseq' file appears in some subfolder."""
+        """A Bruker scan is valid if a '2dseq' file appears in ("*/*/2dseq")."""
         has_2dseq = any(
-            item.is_file() and item.name == "2dseq"
-            for item in scan.rglob("*")
+            (level2 / "2dseq").is_file()
+            for level1 in scan.iterdir()
+            if level1.is_dir()
+            for level2 in level1.iterdir()
+            if level2.is_dir()
         )
-
         return has_2dseq
 
     @staticmethod
     def _is_ivis_scan(scan: Path) -> bool:
-        """An IVIS scan is valid if it contains tif with 'cliclinfo'
+        """An IVIS scan is valid if it contains tif with 'clickinfo'
         in the name."""
 
         has_tiff = any(

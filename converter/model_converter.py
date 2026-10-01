@@ -46,6 +46,10 @@ class ModelConverter:
             ivis2dicom = Ivis2DicomConverter()
             ivis2dicom.convert(src_dst)
 
+    @staticmethod
+    def delete_scan_folder_failed(dst: Path):
+        FilesystemService.delete_folder(dst)
+
     @property
     def input_root(self):
         return self._input_root
