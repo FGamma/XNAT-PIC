@@ -95,6 +95,7 @@ class ControllerConverter:
             self._notify_conversion_outcome(failed_scans)
             self._delete_failed_folders(failed_scans)
         except Exception as e:
+            self._model.delete_scan_folder_failed(self._model.output_root)
             self._view.create_alert(
                 f"Error during conversion: {e}"
             )
