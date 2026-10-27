@@ -197,160 +197,191 @@ class XnatUpload:
     ) -> None:
         if max_attempts < 1:
             raise ValueError("max_attempts must be >= 1")
+
         if poll_interval_seconds < 0:
             raise ValueError("poll_interval_seconds must be >= 0")
 
-        last_status = "unknown"
-        last_state_class = "unknown"
-        last_action_error = None
-        fetch_failures = 0
-        max_fetch_failures = max(3, min(6, max_attempts))
         max_rebuild_requests = min(max_attempts, 3)
-        max_archive_requests = 1
-        rebuild_requests = 0
-        archive_requests = 0
-        rebuild_dispatched = False
-        archive_dispatched = False
+        max_fetch_failures = max(3, min(6, max_attempts))
 
-        reusable_session = self._as_prearchive_session(imported_session)
+        rebuild_requests = 0
+        archive_requested = False
+        fetch_failures = 0
+
+        last_status = "unknown"
+        last_state = "unknown"
+        last_action_error = None
+
+        session = self._as_prearchive_session(imported_session)
+
         for attempt in range(1, max_attempts + 1):
-            if self.experiment_exists(project_id, subject_id, experiment_id):
+
+            # 1. Successo soltanto se l'esperimento esiste.
+            if self.experiment_exists(
+                    project_id,
+                    subject_id,
+                    experiment_id,
+            ):
                 return
-            prearchive_session = reusable_session
-            reusable_session = None
-            if prearchive_session is None:
+
+            # 2. Recupera la sessione Prearchive.
+            if session is None:
                 try:
-                    prearchive_session = self._find_prearchive_session(
+                    session = self._find_prearchive_session(
                         project_id=project_id,
                         subject_id=subject_id,
                         experiment_id=experiment_id,
                     )
                     fetch_failures = 0
+
                 except Exception as err:
                     fetch_failures += 1
                     last_action_error = err
+
                     if fetch_failures >= max_fetch_failures:
                         raise RuntimeError(
-                            "Repeated failures while fetching prearchive session state; "
-                            f"aborting after {fetch_failures} failures."
+                            "Repeated failures while retrieving "
+                            "the Prearchive session. "
+                            f"Failures: {fetch_failures}."
                         ) from err
-                    if attempt < max_attempts:
-                        time.sleep(poll_interval_seconds)
-                    continue
 
-            if prearchive_session is None:
-                if last_status and (
-                    self._is_in_progress_prearchive_status(last_status)
-                    or self._is_transient_prearchive_status(last_status)
-                ):
-                    return
+                    session = None
 
-                if rebuild_dispatched or archive_dispatched:
-                    return
-
-                if attempt < max_attempts:
-                    time.sleep(poll_interval_seconds)
-                    continue
-
-                break
-
-            status = str(getattr(prearchive_session, "status", "") or "").strip().lower()
-            last_status = status or "unknown"
-
-            last_state_class = self._classify_prearchive_status(last_status)
-
-            if last_state_class == "receiving":
-                if rebuild_requests >= max_rebuild_requests:
-                    raise RuntimeError(
-                        "Prearchive session remained in RECEIVING after "
-                        f"{rebuild_requests} rebuild request(s)."
-                    ) from last_action_error
-
-                try:
-                    rebuild_requests += 1
-                    prearchive_session.rebuild(asynchronous=False)
-                    rebuild_dispatched = True
-                except Exception as err:
-                    rebuild_dispatched = True
-                    last_action_error = err
-
-                self._session.clearcache()
+            # 3. Sessione assente: attendi e verifica nuovamente.
+            if session is None:
                 if attempt < max_attempts:
                     time.sleep(poll_interval_seconds)
                 continue
 
-            if last_state_class == "transient":
-                return
+            # 4. Classificazione rigorosa dello stato.
+            last_status = (
+                str(getattr(session, "status", "") or "")
+                .strip()
+                .lower()
+            )
 
-            if last_state_class == "in_progress":
-                if attempt < max_attempts:
-                    time.sleep(poll_interval_seconds)
-                    continue
-                return
+            last_state = self._classify_prearchive_status(last_status)
 
-            if last_state_class == "archivable":
-                if archive_requests >= max_archive_requests:
-                    if attempt < max_attempts:
-                        time.sleep(poll_interval_seconds)
-                        continue
-                    break
+            # 5. Transizioni consentite.
+            if last_state == "receiving":
+
+                if rebuild_requests >= max_rebuild_requests:
+                    raise RuntimeError(
+                        "Prearchive session remained in RECEIVING "
+                        f"after {rebuild_requests} rebuild request(s). "
+                        f"Status: {last_status}."
+                    ) from last_action_error
+
+                rebuild_requests += 1
+
                 try:
-                    archive_requests += 1
-                    prearchive_session.archive(
-                        overwrite="append",
-                        quarantine=False,
-                        project=project_id,
-                        subject=subject_id,
-                        experiment=experiment_id,
-                    )
-                    archive_dispatched = True
+                    session.rebuild(asynchronous=False)
+
                 except Exception as err:
-                    archive_dispatched = True
+                    # Esito incerto: XNAT potrebbe aver accettato
+                    # la richiesta anche se il client ha ricevuto errore.
                     last_action_error = err
 
-                self._session.clearcache()
-            elif last_state_class in {"error", "unknown"}:
-                raise RuntimeError(
-                    "Prearchive session reached a terminal/non-actionable status "
-                    f"'{last_status}' for project '{project_id}', subject '{subject_id}', "
-                    f"experiment '{experiment_id}'."
-                )
-            else:
-                raise RuntimeError(
-                    "Prearchive session reached an unsupported status "
-                    f"'{last_status}' for project '{project_id}', subject '{subject_id}', "
-                    f"experiment '{experiment_id}'."
-                )
-            if self.experiment_exists(project_id, subject_id, experiment_id):
-                return
+                finally:
+                    self._session.clearcache()
+                    session = None
 
+            elif last_state == "ready":
+
+                if not archive_requested:
+                    # Imposta il flag prima della chiamata:
+                    # non ripetere automaticamente un'azione dall'esito incerto.
+                    archive_requested = True
+
+                    try:
+                        session.archive(
+                            overwrite="append",
+                            quarantine=False,
+                            project=project_id,
+                            subject=subject_id,
+                            experiment=experiment_id,
+                        )
+
+                    except Exception as err:
+                        last_action_error = err
+
+                    finally:
+                        self._session.clearcache()
+                        session = None
+
+                else:
+                    # Archiviazione già richiesta:
+                    # verifica l'esito senza ripetere archive().
+                    session = None
+
+            elif last_state == "conflict":
+                # CONFLICT non equivale a READY.
+                # Non archiviare automaticamente.
+                raise RuntimeError(
+                    "Prearchive session is in CONFLICT state. "
+                    "Automatic archiving is not permitted. "
+                    f"Project: {project_id}; "
+                    f"subject: {subject_id}; "
+                    f"experiment: {experiment_id}; "
+                    f"status: {last_status}. "
+                    "Resolve the conflict or define an explicit "
+                    "conflict-handling policy."
+                )
+
+            elif last_state == "transient":
+                # BUILD / ARCHIVE / MOVE / DELETE in corso.
+                # Non inviare altre operazioni.
+                session = None
+
+            elif last_state == "error":
+                raise RuntimeError(
+                    "Prearchive session is in ERROR state. "
+                    f"Project: {project_id}; "
+                    f"subject: {subject_id}; "
+                    f"experiment: {experiment_id}; "
+                    f"status: {last_status}."
+                ) from last_action_error
+
+            elif last_state == "unknown":
+                raise RuntimeError(
+                    "Unrecognized Prearchive status. "
+                    "No automatic action will be performed. "
+                    f"Project: {project_id}; "
+                    f"subject: {subject_id}; "
+                    f"experiment: {experiment_id}; "
+                    f"status: {last_status or '<empty>'}."
+                )
+
+            else:
+                # Protezione aggiuntiva contro nuove categorie
+                # introdotte nel codice senza una transizione definita.
+                raise RuntimeError(
+                    f"Unsupported Prearchive state: {last_state!r}"
+                )
+
+            # 6. Attendi prima del controllo successivo.
             if attempt < max_attempts:
                 time.sleep(poll_interval_seconds)
 
-        if last_status and (
-            self._is_in_progress_prearchive_status(last_status)
-            or self._is_transient_prearchive_status(last_status)
+        # 7. Verifica finale indipendente dal Prearchive.
+        if self.experiment_exists(
+                project_id,
+                subject_id,
+                experiment_id,
         ):
             return
 
-        if rebuild_dispatched or archive_dispatched:
-            if last_action_error is None:
-                return
-
-            raise RuntimeError(
-                "Import session action(s) may have been accepted server-side, "
-                "but the local client observed errors and could not verify completion. "
-                f"Last prearchive status: {last_status}. "
-                f"Last state class: {last_state_class}. "
-                f"rebuild_requests={rebuild_requests}, archive_requests={archive_requests}."
-            ) from last_action_error
-
+        # 8. Timeout: successo non verificato.
         raise RuntimeError(
-            "Unable to archive imported session after "
-            f"{max_attempts} attempts. Last prearchive status: {last_status}. "
-            f"Last state class: {last_state_class}. rebuild_requests={rebuild_requests}, "
-            f"archive_requests={archive_requests}."
-        )
+            "Unable to verify successful session archiving. "
+            f"Project: {project_id}; "
+            f"subject: {subject_id}; "
+            f"experiment: {experiment_id}; "
+            f"last_status: {last_status or '<empty>'}; "
+            f"last_state: {last_state}; "
+            f"rebuild_requests: {rebuild_requests}; "
+            f"archive_requested: {archive_requested}."
+        ) from last_action_error
 
     def _find_prearchive_session(self,
                                  project_id: str,
@@ -391,78 +422,59 @@ class XnatUpload:
         return None
 
     @staticmethod
+    def _classify_prearchive_status(status: str) -> str:
+        normalized = str(status or "").strip().lower()
+
+        # Stati di elaborazione: attendere, senza nuove azioni.
+        transient_statuses = {
+            "archive pending",
+            "build pending",
+            "delete pending",
+            "move pending",
+            "archiving now",
+            "building now",
+            "deleting now",
+            "moving now",
+
+        }
+
+        if normalized in transient_statuses:
+            return "transient"
+
+        # Ricezione: può richiedere rebuild.
+        if normalized == "receiving":
+            return "receiving"
+
+        # Solo READY autorizza l'archiviazione automatica.
+        if normalized == "ready":
+            return "ready"
+
+        # Conflitto distinto da READY.
+        if normalized == "conflict":
+            return "conflict"
+
+        if normalized == "error":
+            return "error"
+
+        # Qualsiasi stato non previsto viene rifiutato.
+        return "unknown"
+
+    @staticmethod
     def _as_prearchive_session(imported_session):
         if imported_session is None:
             return None
 
-        has_archive = callable(getattr(imported_session, "archive", None))
-        has_rebuild = callable(getattr(imported_session, "rebuild", None))
+        has_archive = callable(
+            getattr(imported_session, "archive", None)
+        )
+        has_rebuild = callable(
+            getattr(imported_session, "rebuild", None)
+        )
+
         if has_archive and has_rebuild:
             return imported_session
 
         return None
-
-    @staticmethod
-    def _is_transient_prearchive_status(status: str) -> bool:
-        normalized_status = str(status or "").strip().lower()
-        transient_statuses = {
-            "build pending",
-            "building now",
-            "archive pending",
-            "archiving now",
-            "rebuild pending",
-            "rebuilding now",
-            "delete pending",
-            "deleting now",
-            "move pending",
-            "moving now",
-        }
-        return normalized_status in transient_statuses
-
-    @staticmethod
-    def _is_error_prearchive_status(status: str) -> bool:
-        normalized_status = str(status or "").strip().lower()
-        error_tokens = {"error", "failed", "fail"}
-        return any(token in normalized_status for token in error_tokens)
-
-    def _classify_prearchive_status(self, status: str) -> str:
-        normalized_status = str(status or "").strip().lower()
-        if not normalized_status:
-            return "unknown"
-        if self._is_transient_prearchive_status(normalized_status):
-            return "transient"
-        if self._is_receiving_prearchive_status(normalized_status):
-            return "receiving"
-        if self._is_archivable_prearchive_status(normalized_status):
-            return "archivable"
-        if self._is_error_prearchive_status(normalized_status):
-            return "error"
-        if self._is_in_progress_prearchive_status(normalized_status):
-            return "in_progress"
-        return "unknown"
-
-    @staticmethod
-    def _is_receiving_prearchive_status(status: str) -> bool:
-        normalized_status = str(status or "").strip().lower()
-        return "receiv" in normalized_status
-
-    @staticmethod
-    def _is_archivable_prearchive_status(status: str) -> bool:
-        normalized_status = str(status or "").strip().lower()
-        return normalized_status in {"ready", "conflict"}
-
-    @staticmethod
-    def _is_in_progress_prearchive_status(status: str) -> bool:
-        normalized_status = str(status or "").strip().lower()
-        in_progress_tokens = {
-            "rebuild",
-            "build",
-            "archiv",
-            "process",
-            "queue",
-            "mov",
-        }
-        return any(token in normalized_status for token in in_progress_tokens)
 
     @staticmethod
     def _upload_resource_file(resource, local_file: Path, remote_path: str) -> None:
