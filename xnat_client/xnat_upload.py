@@ -121,25 +121,21 @@ class XnatUpload:
             )
         return uploaded_files
 
-    def experiment_exists(self, project_id: str, subject_id: str, experiment_id: str):
-        normalized_project_id = self._sanitize_label(str(project_id or "").strip())
-        normalized_subject_id = self._sanitize_label(str(subject_id or "").strip())
-        normalized_experiment_id = self._sanitize_label(str(experiment_id or "").strip())
-
-        if not normalized_project_id or not normalized_subject_id or not normalized_experiment_id:
+    def experiment_exists(self, project_id: str, subject_id: str, experiment_id: str) -> bool:
+        if not project_id or not subject_id or not experiment_id:
             return False
 
         try:
-            experiments = self.list_experiments(normalized_project_id, normalized_subject_id)
+            experiments = self.list_experiments(project_id, subject_id)
         except Exception:
             return False
 
         return any(
-            e["id"] == normalized_experiment_id or e["label"] == normalized_experiment_id
+            e["id"] == experiment_id or e["label"] == experiment_id
             for e in experiments
         )
 
-    def list_experiments(self, project_id, subject_id):
+    def list_experiments(self, project_id, subject_id) -> list[dict[str, str]]:
         subj = self._session.projects[project_id].subjects[subject_id]
 
         return [
@@ -371,17 +367,13 @@ class XnatUpload:
             except TypeError:
                 sessions = self._session.prearchive.sessions()
 
-        normalized_subject = str(subject_id or "").strip()
-        normalized_experiment = str(experiment_id or "").strip()
-        normalized_project = str(project_id or "").strip()
-
         for prearchive_session in sessions:
             session_project = str(getattr(prearchive_session, "project", "") or "").strip()
-            if normalized_project and session_project != normalized_project:
+            if project_id and session_project != project_id:
                 continue
 
             session_subject = str(getattr(prearchive_session, "subject", "") or "").strip()
-            if normalized_subject and session_subject != normalized_subject:
+            if subject_id and session_subject != subject_id:
                 continue
 
             session_keys = {
@@ -390,10 +382,10 @@ class XnatUpload:
                 str(getattr(prearchive_session, "folder_name", "") or "").strip(),
                 str(getattr(prearchive_session, "id", "") or "").strip(),
             }
-            if normalized_experiment and normalized_experiment not in session_keys:
+            if experiment_id and experiment_id not in session_keys:
                 continue
 
-            if normalized_subject or normalized_experiment:
+            if subject_id or experiment_id:
                 return prearchive_session
 
         return None

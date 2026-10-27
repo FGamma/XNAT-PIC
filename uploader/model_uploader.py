@@ -1,4 +1,7 @@
+import re
 from pathlib import Path
+
+import unicodedata
 
 from uploader.services.dicom.dicom_compatibility_service import \
     DicomCompatibilityService
@@ -118,7 +121,7 @@ class ModelUploader:
         return validate_dicom_report
 
     def build_upload_targets(self, selected_subject_id: str | None,
-                             selected_experiment_id: str | None):
+                             selected_experiment_id: str | None) -> list:
         """
         Build upload targets according to current uploader level.
         """
@@ -234,9 +237,16 @@ class ModelUploader:
 
     @staticmethod
     def _normalize_id(name: str) -> str:
-        normalized = name.strip()
-        normalized = normalized.replace(" ", "_")
-        normalized = normalized.replace(".", "_")
-        normalized = normalized.replace("-", "_")
+        normalized = unicodedata.normalize("NFKD", name.strip())
+        normalized = normalized.encode("ascii", "ignore").decode("ascii")
+        normalized = re.sub(r"[^a-zA-Z0-9_-]+", "_", normalized)
+        normalized = normalized.strip("_")
+
+        if not normalized:
+            raise ValueError("The name cannot be empty")
+
+        if len(normalized) > 64:
+            raise ValueError("Name exceeds 64 characters")
+
         return normalized
 
