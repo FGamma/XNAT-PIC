@@ -165,7 +165,6 @@ class ControllerUploader:
             self._view.populate_projects(projects)
         except Exception as e:
             self._view.create_alert(f"Cannot load projects: {e}")
-            return
 
     def on_project_selected(self, e: ft.ControlEvent):
         project_id = self._view.dd_xnat_project.value
@@ -655,7 +654,7 @@ class ControllerUploader:
             failure_summary += "; ..."
 
         self._view.create_alert(
-            "Upload completed with errors "
+            "Upload with errors "
             f"({success_count} ok, {failed_count} failed). "
             f"Failed uploads: {failure_summary}"
         )
@@ -675,7 +674,7 @@ class ControllerUploader:
         experiment_id = self._view.dd_xnat_experiment.value
 
         try:
-            uploaded_files = self._xnat_upload.upload_files_resources(
+            upload_non_dicom_report = self._xnat_upload.upload_files_resources(
                 source_folder=base_path,
                 project_id=project_id,
                 subject_id=subject_id,
@@ -683,13 +682,12 @@ class ControllerUploader:
             )
         except Exception as err:
             self._view.create_alert(
-                f"Unexpected error during resources upload: {err}"
+                f"Error during resources upload: {err}"
             )
             return
 
-        self._view.create_alert(
-            f"Resources upload completed successfully ({uploaded_files} files)."
-        )
+        report_message = self._report_non_dicom_upload(upload_non_dicom_report)
+        self._view.create_alert(report_message)
 
     @contextmanager
     def _upload_progress_dialog(self):
@@ -739,4 +737,47 @@ class ControllerUploader:
 
         return message
 
+    @staticmethod
+    def _report_non_dicom_upload(upload_report: dict) -> str:
+
+        if upload_report["failed"]:
+            failed_files = upload_report["failed"]
+            total_failed = len(failed_files)
+
+            successful = upload_report["uploaded"]
+
+            max_errors_to_show = 3
+            displayed_errors = failed_files[:max_errors_to_show]
+
+            error_details = "\n".join(
+                f"  • {Path(entry['file']).name}\n"
+                f"    Reason: {entry['reason']}"
+                for entry in displayed_errors
+            )
+
+            remaining = total_failed - len(displayed_errors)
+
+            if remaining > 0:
+                error_details += f"\n  ... and {remaining} more error(s)."
+
+            message = (
+                "Non-DICOM resource upload completed with errors.\n\n"
+                "Summary:\n"
+                f"  • Total files: {upload_report['total']}\n"
+                f"  • Uploaded: {successful}\n"
+                f"  • Failed: {total_failed}\n\n"
+                "Failed files:\n"
+                f"{error_details}"
+            )
+
+        else:
+            message = (
+                "Non-DICOM files upload completed successfully.\n\n"
+                "Summary:\n"
+                f"  • Total files: {upload_report['total']}\n"
+                f"  • Uploaded: {upload_report['uploaded']}\n"
+                "  • Failed: 0"
+            )
+
+        return message
 

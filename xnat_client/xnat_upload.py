@@ -1,7 +1,12 @@
+import re
 import shutil
 import tempfile
 import time
 from pathlib import Path
+
+import unicodedata
+from xnat.core import XNATListing
+from xnat.prearchive import PrearchiveSession
 
 from xnat_client.xnat_session import XnatSession
 
@@ -13,14 +18,12 @@ class XnatUpload:
         self._session = xnat_session.session
 
     def upload_dicom(self,
-                     exp_folder,
-                     project_id,
-                     subject_id,
-                     experiment_id,
-                     max_attempts=9,
-                     poll_interval_seconds=10.0):
-
-        exp_folder = Path(exp_folder)
+                     exp_folder: Path,
+                     project_id: str,
+                     subject_id: str,
+                     experiment_id: str,
+                     max_attempts: int=9,
+                     poll_interval_seconds: int| float=10.0):
 
         try:
             with tempfile.TemporaryDirectory() as tmpdir:
@@ -56,16 +59,12 @@ class XnatUpload:
 
     def upload_files_resources(
             self,
-            source_folder,
-            project_id,
-            subject_id,
-            experiment_id,
-            default_resource_label="NON_DICOM",
-    ):
-        source_folder = Path(source_folder)
-
-        resource_label = source_folder.name if source_folder.name else default_resource_label
-
+            source_folder: Path,
+            project_id: str,
+            subject_id: str,
+            experiment_id: str,
+            default_resource_label: str="NON_DICOM",
+    ) -> dict[str, int | list[dict[str, str]]]:
         if not source_folder.exists() or not source_folder.is_dir():
             raise ValueError("Resource source folder is not valid.")
 
@@ -75,51 +74,55 @@ class XnatUpload:
                 "to upload resources."
             )
 
-        files_by_resource = self._group_resource_files(
-            source_folder,
-            resource_label,
-        )
+        resource_label = self._sanitize_label(source_folder.name or default_resource_label) or default_resource_label
+
+        if not resource_label:
+            raise ValueError("Resource label cannot be empty.")
+
+        files_by_resource = self._group_resource_files(source_folder)
 
         if not files_by_resource:
             raise ValueError("No non-DICOM files found to upload.")
 
-        uploaded_files = 0
-        failed_uploads = []
-        for resource_label, resources in files_by_resource.items():
-            try:
-                resource = self._get_or_create_experiment_resource(
-                    project_id,
-                    subject_id,
-                    experiment_id,
-                    resource_label,
-                )
-            except KeyError as err:
-                raise ValueError(
-                    "Invalid XNAT target. Verify project, subject and experiment "
-                    "exist and are accessible."
-                ) from err
+        try:
+            resource = self._get_or_create_experiment_resource(
+                project_id,
+                subject_id,
+                experiment_id,
+                resource_label,
+            )
+        except KeyError as err:
+            raise ValueError(
+                "Invalid XNAT target. Verify project, subject and experiment "
+                "exist and are accessible."
+            ) from err
 
-            for local_file, remote_path in resources:
-                try:
-                    self._upload_resource_file(resource, local_file, remote_path)
-                    uploaded_files += 1
-                except Exception as err:
-                    failed_uploads.append(
-                        f"{local_file.name}: {err}"
-                    )
+        upload_non_dicom_report = {
+            "total": len(files_by_resource),
+            "uploaded": 0,
+            "failed":  []
+        }
+
+        for local_file, remote_path in files_by_resource:
+            try:
+                # Build the XNAT file URI
+                uri = f"{resource.uri.rstrip('/')}/files/{remote_path.lstrip('/')}"
+
+                # Upload file
+                self._session.upload_file(
+                    uri=uri,
+                    path=local_file,
+                    overwrite=False,
+                    retries=3,
+                    timeout=300,
+                )
+                upload_non_dicom_report["uploaded"] += 1
+            except Exception as err:
+                upload_non_dicom_report["failed"].append({"file": str(local_file.name), "reason": str(err)})
 
         self._session.clearcache()
 
-        if failed_uploads:
-            failures_preview = "; ".join(failed_uploads[:5])
-            if len(failed_uploads) > 5:
-                failures_preview += "; ..."
-            raise RuntimeError(
-                "Resources upload completed with errors "
-                f"({uploaded_files} uploaded, {len(failed_uploads)} failed). "
-                f"Failures: {failures_preview}"
-            )
-        return uploaded_files
+        return upload_non_dicom_report
 
     def experiment_exists(self, project_id: str, subject_id: str, experiment_id: str) -> bool:
         if not project_id or not subject_id or not experiment_id:
@@ -135,56 +138,13 @@ class XnatUpload:
             for e in experiments
         )
 
-    def list_experiments(self, project_id, subject_id) -> list[dict[str, str]]:
+    def list_experiments(self, project_id: str, subject_id: str) -> list[dict[str, str]]:
         subj = self._session.projects[project_id].subjects[subject_id]
 
         return [
             {"id": e.id, "label": e.label or e.id}
             for e in subj.experiments.values()
         ]
-
-    def _group_resource_files(self, source_folder: Path,
-                              resource_label: str):
-        sanitized_label = self._sanitize_label(resource_label)
-        grouped = {sanitized_label: []}
-        for local_file in source_folder.rglob("*"):
-            if not local_file.is_file():
-                continue
-
-            if local_file.suffix.lower() in {".dcm", ".dicom"}:
-                continue
-
-            relative_path = local_file.relative_to(source_folder)
-            remote_path = relative_path.as_posix()
-
-            grouped[sanitized_label].append(
-                (local_file, remote_path)
-            )
-
-        if not grouped[sanitized_label]:
-            return {}
-
-        return grouped
-
-    def _get_or_create_experiment_resource(self,
-                                           project_id: str,
-                                           subject_id: str,
-                                           experiment_id: str,
-                                           resource_label: str):
-
-        session = self._session
-        xnat_experiment = session.projects[project_id].subjects[subject_id].experiments[experiment_id]
-        resource_label = self._sanitize_label(resource_label)
-
-        if not resource_label in xnat_experiment.resources:
-            self._session.classes.ResourceCatalog(
-                parent=xnat_experiment,
-                label=resource_label,
-            )
-            self._session.clearcache()
-
-        resource = xnat_experiment.resources[resource_label]
-        return resource
 
     def _rebuild_and_archive_imported_session(
             self,
@@ -216,7 +176,7 @@ class XnatUpload:
 
         for attempt in range(1, max_attempts + 1):
 
-            # 1. Successo soltanto se l'esperimento esiste.
+            # 1. Success only if the experiment exists.
             if self.experiment_exists(
                     project_id,
                     subject_id,
@@ -224,7 +184,7 @@ class XnatUpload:
             ):
                 return
 
-            # 2. Recupera la sessione Prearchive.
+            # 2. Retrieve the session.
             if session is None:
                 try:
                     session = self._find_prearchive_session(
@@ -247,13 +207,13 @@ class XnatUpload:
 
                     session = None
 
-            # 3. Sessione assente: attendi e verifica nuovamente.
+            # 3. Session absent: wait and check again.
             if session is None:
                 if attempt < max_attempts:
                     time.sleep(poll_interval_seconds)
                 continue
 
-            # 4. Classificazione rigorosa dello stato.
+            # 4. Classification of the state.
             last_status = (
                 str(getattr(session, "status", "") or "")
                 .strip()
@@ -262,7 +222,7 @@ class XnatUpload:
 
             last_state = self._classify_prearchive_status(last_status)
 
-            # 5. Transizioni consentite.
+            # 5. State
             if last_state == "receiving":
 
                 if rebuild_requests >= max_rebuild_requests:
@@ -278,8 +238,6 @@ class XnatUpload:
                     session.rebuild(asynchronous=False)
 
                 except Exception as err:
-                    # Esito incerto: XNAT potrebbe aver accettato
-                    # la richiesta anche se il client ha ricevuto errore.
                     last_action_error = err
 
                 finally:
@@ -289,8 +247,6 @@ class XnatUpload:
             elif last_state == "ready":
 
                 if not archive_requested:
-                    # Imposta il flag prima della chiamata:
-                    # non ripetere automaticamente un'azione dall'esito incerto.
                     archive_requested = True
 
                     try:
@@ -310,13 +266,9 @@ class XnatUpload:
                         session = None
 
                 else:
-                    # Archiviazione già richiesta:
-                    # verifica l'esito senza ripetere archive().
                     session = None
 
             elif last_state == "conflict":
-                # CONFLICT non equivale a READY.
-                # Non archiviare automaticamente.
                 raise RuntimeError(
                     "Prearchive session is in CONFLICT state. "
                     "Automatic archiving is not permitted. "
@@ -329,8 +281,8 @@ class XnatUpload:
                 )
 
             elif last_state == "transient":
-                # BUILD / ARCHIVE / MOVE / DELETE in corso.
-                # Non inviare altre operazioni.
+                # BUILD / ARCHIVE / MOVE / DELETE in progress.
+                # Do not submit any further operations.
                 session = None
 
             elif last_state == "error":
@@ -353,17 +305,15 @@ class XnatUpload:
                 )
 
             else:
-                # Protezione aggiuntiva contro nuove categorie
-                # introdotte nel codice senza una transizione definita.
                 raise RuntimeError(
                     f"Unsupported Prearchive state: {last_state!r}"
                 )
 
-            # 6. Attendi prima del controllo successivo.
+            # 6. Wait before the next check.
             if attempt < max_attempts:
                 time.sleep(poll_interval_seconds)
 
-        # 7. Verifica finale indipendente dal Prearchive.
+        # 7. Final verification independent of the Prearchive.
         if self.experiment_exists(
                 project_id,
                 subject_id,
@@ -371,7 +321,6 @@ class XnatUpload:
         ):
             return
 
-        # 8. Timeout: successo non verificato.
         raise RuntimeError(
             "Unable to verify successful session archiving. "
             f"Project: {project_id}; "
@@ -383,10 +332,18 @@ class XnatUpload:
             f"archive_requested: {archive_requested}."
         ) from last_action_error
 
-    def _find_prearchive_session(self,
-                                 project_id: str,
-                                 subject_id: str,
-                                 experiment_id: str):
+    def _find_prearchive_session(
+            self,
+            project_id: str,
+            subject_id: str,
+            experiment_id: str,
+    ) -> PrearchiveSession | None:
+
+        # Validate search parameters
+        if not all((project_id, subject_id, experiment_id)):
+            return None
+
+        # Retrieve prearchive sessions, supporting different API signatures
         try:
             sessions = self._session.prearchive.sessions(
                 project=project_id,
@@ -394,38 +351,78 @@ class XnatUpload:
             )
         except TypeError:
             try:
-                sessions = self._session.prearchive.sessions(project=project_id)
+                sessions = self._session.prearchive.sessions(
+                    project=project_id
+                )
             except TypeError:
                 sessions = self._session.prearchive.sessions()
 
-        for prearchive_session in sessions:
-            session_project = str(getattr(prearchive_session, "project", "") or "").strip()
-            if project_id and session_project != project_id:
+        # Filter matching sessions
+        matches = []
+
+        for session in sessions:
+            session_project = str(
+                getattr(session, "project", "") or ""
+            ).strip()
+
+            session_subject = str(
+                getattr(session, "subject", "") or ""
+            ).strip()
+
+            if session_project != project_id:
                 continue
 
-            session_subject = str(getattr(prearchive_session, "subject", "") or "").strip()
-            if subject_id and session_subject != subject_id:
+            if session_subject != subject_id:
                 continue
 
-            session_keys = {
-                str(getattr(prearchive_session, "name", "") or "").strip(),
-                str(getattr(prearchive_session, "label", "") or "").strip(),
-                str(getattr(prearchive_session, "folder_name", "") or "").strip(),
-                str(getattr(prearchive_session, "id", "") or "").strip(),
+            session_identifiers = {
+                str(getattr(session, attr, "") or "").strip()
+                for attr in ("name", "label", "folder_name", "id")
             }
-            if experiment_id and experiment_id not in session_keys:
+
+            if experiment_id not in session_identifiers:
                 continue
 
-            if subject_id or experiment_id:
-                return prearchive_session
+            matches.append(session)
 
-        return None
+        # Ensure unique match
+        if not matches:
+            return None
+
+        if len(matches) > 1:
+            raise ValueError(
+                f"Multiple prearchive sessions found for "
+                f"project={project_id}, subject={subject_id}, "
+                f"experiment={experiment_id}"
+            )
+
+        return matches[0]
+
+    def _get_or_create_experiment_resource(self,
+                                           project_id: str,
+                                           subject_id: str,
+                                           experiment_id: str,
+                                           resource_label: str) -> XNATListing:
+
+        experiment = (
+            self._session.projects[project_id]
+            .subjects[subject_id]
+            .experiments[experiment_id]
+        )
+
+        if resource_label not in experiment.resources:
+            self._session.classes.ResourceCatalog(
+                parent=experiment,
+                label=resource_label,
+            )
+            self._session.clearcache()
+
+        return experiment.resources[resource_label]
 
     @staticmethod
     def _classify_prearchive_status(status: str) -> str:
         normalized = str(status or "").strip().lower()
 
-        # Stati di elaborazione: attendere, senza nuove azioni.
         transient_statuses = {
             "archive pending",
             "build pending",
@@ -441,26 +438,22 @@ class XnatUpload:
         if normalized in transient_statuses:
             return "transient"
 
-        # Ricezione: può richiedere rebuild.
         if normalized == "receiving":
             return "receiving"
 
-        # Solo READY autorizza l'archiviazione automatica.
         if normalized == "ready":
             return "ready"
 
-        # Conflitto distinto da READY.
         if normalized == "conflict":
             return "conflict"
 
         if normalized == "error":
             return "error"
 
-        # Qualsiasi stato non previsto viene rifiutato.
         return "unknown"
 
     @staticmethod
-    def _as_prearchive_session(imported_session):
+    def _as_prearchive_session(imported_session: PrearchiveSession) -> PrearchiveSession | None:
         if imported_session is None:
             return None
 
@@ -477,24 +470,32 @@ class XnatUpload:
         return None
 
     @staticmethod
-    def _upload_resource_file(resource, local_file: Path, remote_path: str) -> None:
-        """Upload ``local_file`` preserving binary content."""
-        upload_method = getattr(resource, "upload", None)
-        if callable(upload_method):
-            upload_method(str(local_file), remotepath=remote_path, overwrite=True)
-            return
+    def _group_resource_files(source_folder: Path) -> list[tuple[Path, str]]:
+        grouped_files = []
 
-        with local_file.open("rb") as file_stream:
-            resource.upload_data(
-                file_stream.read(),
-                remotepath=remote_path,
-                overwrite=True,
-            )
+        for local_file in source_folder.rglob("*"):
+            if not local_file.is_file():
+                continue
+
+            if local_file.suffix.lower() in {".dcm", ".dicom"}:
+                continue
+
+            remote_path = local_file.relative_to(source_folder).as_posix()
+            grouped_files.append((local_file, remote_path))
+
+        return grouped_files
 
     @staticmethod
-    def _sanitize_label(label: str):
-        cleaned = "".join(
-            ch if (ch.isalnum() or ch in {"_", "-"}) else "_"
-            for ch in label.strip()
-        )
-        return cleaned or None
+    def _sanitize_label(label: str) -> str:
+        normalized = unicodedata.normalize("NFKD", label.strip())
+        normalized = normalized.encode("ascii", "ignore").decode("ascii")
+        normalized = re.sub(r"[^a-zA-Z0-9_-]+", "_", normalized)
+        normalized = normalized.strip("_")
+
+        if not normalized:
+            return ""
+
+        if len(normalized) > 64:
+            return ""
+
+        return normalized
