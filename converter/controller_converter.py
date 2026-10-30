@@ -100,7 +100,6 @@ class ControllerConverter:
                 f"Error during conversion: {e}"
             )
             self._view.update_page()
-            raise
 
     def _prepare_conversion(self):
         """Prepare the model for conversion and load scans."""

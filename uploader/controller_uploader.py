@@ -471,6 +471,11 @@ class ControllerUploader:
     # UPLOAD
     # ==========================================================
     def dicom_and_not_dicom_upload(self, e: ft.ControlEvent):
+        """Start the upload and show the progress dialog."""
+        with self._upload_progress_dialog():
+            self._run_upload()
+
+    def _run_upload(self):
         if not self._xnat_upload:
             self._view.create_alert("You must login to XNAT first.")
             return
@@ -485,11 +490,10 @@ class ControllerUploader:
             self._view.create_alert("Select a project in XNAT.")
             return
 
-        with self._upload_progress_dialog():
-            try:
-                self._upload_planner(base_path, project_id)
-            except Exception as err:
-                self._view.create_alert(f"Upload error: {err}")
+        try:
+            self._upload_planner(base_path, project_id)
+        except Exception as err:
+            self._view.create_alert(f"Upload error: {err}")
 
     # ==========================================================
     # PRIVATE METHODS
@@ -598,11 +602,11 @@ class ControllerUploader:
 
     def _upload_planner(self, base_path, project_id):
         if self._model.level == UploaderLevel.FILE:
-            self._upload_not_dicom_thread(base_path, project_id)
+            self._upload_not_dicom_file(base_path, project_id)
         else:
-            self._upload_dicom_thread(project_id)
+            self._upload_dicom_file(project_id)
 
-    def _upload_dicom_thread(self, project_id: str):
+    def _upload_dicom_file(self, project_id: str):
         try:
             upload_targets = self._model.build_upload_targets(
                 self._view.dd_xnat_subject.value,
@@ -617,8 +621,12 @@ class ControllerUploader:
             return
 
         failed_uploads = []
+        idx = 0
         for exp_folder, subject_id, experiment_id in upload_targets:
             try:
+                self._view.update_progress_bar(idx, len(upload_targets))
+                idx += 1
+
                 self._xnat_upload.upload_dicom(
                     exp_folder,
                     project_id,
@@ -635,31 +643,10 @@ class ControllerUploader:
                     }
                 )
 
-        self._view.dlg_upload.open = False
-        self._view.update_page()
-        if not failed_uploads:
-            self._view.create_alert("Upload completed successfully!")
-            return
+        report_message = self._report_dicom_upload(upload_targets, failed_uploads)
+        self._view.create_alert(report_message)
 
-        failed_count = len(failed_uploads)
-        success_count = len(upload_targets) - failed_count
-        failure_summary = "; ".join(
-            (
-                f"{entry['experiment_id']} (subject {entry['subject_id']}): "
-                f"{entry['error']}"
-            )
-            for entry in failed_uploads[:5]
-        )
-        if failed_count > 5:
-            failure_summary += "; ..."
-
-        self._view.create_alert(
-            "Upload with errors "
-            f"({success_count} ok, {failed_count} failed). "
-            f"Failed uploads: {failure_summary}"
-        )
-
-    def _upload_not_dicom_thread(self, base_path: Path, project_id: str):
+    def _upload_not_dicom_file(self, base_path: Path, project_id: str):
 
         try:
             self._model.validate_resource_upload_context(
@@ -668,6 +655,7 @@ class ControllerUploader:
             )
         except ValueError as err:
             self._view.create_alert(str(err))
+            self._view.update_page()
             return
 
         subject_id = self._view.dd_xnat_subject.value
@@ -684,18 +672,11 @@ class ControllerUploader:
             self._view.create_alert(
                 f"Error during resources upload: {err}"
             )
+            self._view.update_page()
             return
 
         report_message = self._report_non_dicom_upload(upload_non_dicom_report)
         self._view.create_alert(report_message)
-
-    @contextmanager
-    def _upload_progress_dialog(self):
-        self._view.show_progress_bar_dialog()
-        try:
-            yield
-        finally:
-            self._view.close_progress_bar_dialog()
 
     @staticmethod
     def _dropdown_has_option(dropdown: ft.Dropdown, key: str):
@@ -738,8 +719,52 @@ class ControllerUploader:
         return message
 
     @staticmethod
-    def _report_non_dicom_upload(upload_report: dict) -> str:
+    def _report_dicom_upload(
+            upload_targets: list,
+            failed_uploads: list[dict],
+    ) -> str:
+        failed_count = len(failed_uploads)
+        success_count = len(upload_targets) - failed_count
 
+        if failed_count == 0:
+            message = (
+                "Upload completed successfully!\n\n"
+                "Summary:\n"
+                f"  • Total uploads: {len(upload_targets)}\n"
+                f"  • Successful: {success_count}\n"
+                "  • Failed: 0"
+            )
+            return message
+
+        max_errors_to_show = 5
+        displayed_errors = failed_uploads[:max_errors_to_show]
+
+        failure_details = "\n".join(
+            f"  • Experiment: {entry['experiment_id']} "
+            f"(Subject: {entry['subject_id']})\n"
+            f"    Reason: {entry['error']}"
+            for entry in displayed_errors
+        )
+
+        remaining = failed_count - len(displayed_errors)
+
+        if remaining > 0:
+            failure_details += f"\n  ... and {remaining} more error(s)."
+
+        message = (
+            "Upload completed with errors.\n\n"
+            "Summary:\n"
+            f"  • Total uploads: {len(upload_targets)}\n"
+            f"  • Successful: {success_count}\n"
+            f"  • Failed: {failed_count}\n\n"
+            "Failed uploads:\n"
+            f"{failure_details}"
+        )
+
+        return message
+
+    @staticmethod
+    def _report_non_dicom_upload(upload_report: dict) -> str:
         if upload_report["failed"]:
             failed_files = upload_report["failed"]
             total_failed = len(failed_files)
@@ -761,7 +786,7 @@ class ControllerUploader:
                 error_details += f"\n  ... and {remaining} more error(s)."
 
             message = (
-                "Non-DICOM resource upload completed with errors.\n\n"
+                "Non-DICOM files upload completed with errors.\n\n"
                 "Summary:\n"
                 f"  • Total files: {upload_report['total']}\n"
                 f"  • Uploaded: {successful}\n"
@@ -781,3 +806,10 @@ class ControllerUploader:
 
         return message
 
+    @contextmanager
+    def _upload_progress_dialog(self):
+        self._view.show_progress_bar_dialog()
+        try:
+            yield
+        finally:
+            self._view.close_progress_bar_dialog()
