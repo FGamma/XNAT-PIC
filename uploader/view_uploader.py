@@ -216,11 +216,11 @@ class ViewUploader(BaseView, AuthDialogMixin, XnatDropdownMixin):
         self._page.open(self.dlg_upload)
         self._page.update()
 
-    def update_progress_bar(self, idx: int, total_scans: int):
+    def update_progress_bar(self, value_pb: float | int | None, text_pb: str):
         """Update the progress bar value and refresh the page."""
-        value = (idx + 1) / total_scans
-        self.pb_upload.value = value
-        self.txt_pb.value = f"Experiment uploaded: {idx+1}/{total_scans}"
+        if value_pb:
+            self.pb_upload.value = value_pb
+        self.txt_pb.value = text_pb
         self._page.update()
 
     def close_progress_bar_dialog(self):

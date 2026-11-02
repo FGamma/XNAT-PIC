@@ -624,7 +624,9 @@ class ControllerUploader:
         idx = 0
         for exp_folder, subject_id, experiment_id in upload_targets:
             try:
-                self._view.update_progress_bar(idx, len(upload_targets))
+                value_pb = (idx + 1) / len(upload_targets)
+                text_pb = f"Uploading experiment: {idx + 1}/{len(upload_targets)}"
+                self._view.update_progress_bar(value_pb, text_pb)
                 idx += 1
 
                 self._xnat_upload.upload_dicom(
@@ -662,6 +664,9 @@ class ControllerUploader:
         experiment_id = self._view.dd_xnat_experiment.value
 
         try:
+            text_pb = "Uploading non-dicom files..."
+            self._view.update_progress_bar(None, text_pb)
+
             upload_non_dicom_report = self._xnat_upload.upload_files_resources(
                 source_folder=base_path,
                 project_id=project_id,
@@ -809,6 +814,8 @@ class ControllerUploader:
     @contextmanager
     def _upload_progress_dialog(self):
         self._view.show_progress_bar_dialog()
+        text_pb = "Loading..."
+        self._view.update_progress_bar(None, text_pb)
         try:
             yield
         finally:
