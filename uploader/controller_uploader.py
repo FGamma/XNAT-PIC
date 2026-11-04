@@ -265,7 +265,7 @@ class ControllerUploader:
                 self._preview_cache.clear()
                 self._view.reset_image_preview()
             self._view.create_alert("DICOM modality changed successfully.")
-        except (ValueError, RuntimeError, OSError) as err:
+        except Exception as err:
             self._view.create_alert(f"Cannot modify DICOM modality: {err}")
         finally:
             self._view.reset_modality_editor()

@@ -110,7 +110,9 @@ class FilesystemService:
             for ds, filename in new_dicom_file:
                 out_path = dst / filename
                 out_path.parent.mkdir(parents=True, exist_ok=True)
-                ds.save_as(out_path, little_endian=True, implicit_vr=False, write_like_original=False)
+                ds.is_little_endian = True
+                ds.is_implicit_VR = False
+                ds.save_as(out_path, write_like_original=False)
         except (ValueError, OSError, AttributeError, TypeError) as e:
             raise RuntimeError(
                 f"Failed saving converted DICOM file {dicom_file}"
