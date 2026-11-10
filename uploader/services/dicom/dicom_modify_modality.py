@@ -3,6 +3,7 @@ from typing import Iterable
 
 from pydicom import dcmread
 from pydicom.errors import InvalidDicomError
+from pydicom.uid import SecondaryCaptureImageStorage
 
 
 class DicomModifyModality:
@@ -20,6 +21,8 @@ class DicomModifyModality:
         for dicom_scan in dicom_files_to_modify:
             try:
                 ds = dcmread(dicom_scan)
+                ds.file_meta.MediaStorageSOPClassUID = SecondaryCaptureImageStorage
+                ds.ImageType = ["DERIVED", "SECONDARY", "OTHER"]
                 ds.Modality = str(new_modality).strip()
                 dicom_scan.parent.mkdir(parents=True, exist_ok=True)
                 ds.save_as(dicom_scan, write_like_original=False)

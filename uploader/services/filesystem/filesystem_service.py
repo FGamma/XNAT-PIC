@@ -110,8 +110,6 @@ class FilesystemService:
             for ds, filename in new_dicom_file:
                 out_path = dst / filename
                 out_path.parent.mkdir(parents=True, exist_ok=True)
-                ds.is_little_endian = True
-                ds.is_implicit_VR = False
                 ds.save_as(out_path, write_like_original=False)
         except (ValueError, OSError, AttributeError, TypeError) as e:
             raise RuntimeError(
